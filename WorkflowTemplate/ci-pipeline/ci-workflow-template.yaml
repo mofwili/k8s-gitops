@@ -4,6 +4,7 @@ metadata:
   name: ci-cd-pipeline
   namespace: argo
 spec:
+  serviceAccountName: argo-workflow
   entrypoint: ci
   ttlStrategy:
     secondsAfterCompletion: 3600
