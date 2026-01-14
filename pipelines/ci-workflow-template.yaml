@@ -1,0 +1,176 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ci-pipeline
+  namespace: argo
+spec:
+  entrypoint: ci
+  arguments:
+    parameters:
+      - name: repo-url
+        value: https://github.com/mofwili/nodejs-api.git
+      - name: revision
+        value: main
+      - name: manifests-repo-url
+        value: https://github.com/mofwili/k8s-gitops.git
+      - name: manifests-branch
+        value: main
+      - name: image-repo
+        value: vatoscripts/nodejs-api
+
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: docker-credentials
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+
+  templates:
+    - name: ci
+      dag:
+        tasks:
+          - name: clone-code
+            template: clone
+          - name: build-push
+            dependencies: [clone-code]
+            template: build-push
+          - name: update-git
+            dependencies: [build-push]
+            template: update-git
+            arguments:
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone-code.outputs.parameters.sha}}"
+
+    - name: clone
+      inputs:
+        parameters:
+          - name: repo-url
+          - name: revision
+      container:
+        image: alpine/git:latest
+        command: [sh, -c]
+        args:
+          - |
+            git clone {{inputs.parameters.repo-url}} /workspace/repo
+            cd /workspace/repo
+            git checkout {{inputs.parameters.revision}}
+            git rev-parse --short HEAD > /workspace/sha.txt
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+      outputs:
+        parameters:
+          - name: sha
+            valueFrom:
+              path: /workspace/sha.txt
+        artifacts:
+          - name: source
+            path: /workspace/repo
+            archive:
+              none: {}
+      volumes:
+        - name: workspace
+          emptyDir: {}
+
+    - name: build-push
+      inputs:
+        artifacts:
+          - name: source
+            path: /workspace
+        parameters:
+          - name: image-repo
+          - name: sha
+      container:
+        image: gcr.io/kaniko-project/executor:v1.23.2-debug
+        args:
+          - --dockerfile=/workspace/Dockerfile
+          - --context=dir:///workspace
+          - --destination={{inputs.parameters.image-repo}}:{{inputs.parameters.sha}}
+          - --cache=true
+          - --cache-copy-layers=true
+        env:
+          - name: DOCKER_CONFIG
+            value: /kaniko/.docker
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+          - name: docker-config
+            mountPath: /kaniko/.docker
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: docker-credentials
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+
+    - name: update-git
+      inputs:
+        parameters:
+          - name: sha
+      script:
+        image: mikefarah/yq:4.44.3
+        command: [bash]
+        env:
+          - name: GIT_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: git-credentials
+                key: username
+          - name: GIT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: git-credentials
+                key: password
+        source: |
+          set -euo pipefail
+
+          echo "Updating manifests with new image tag: vatoscripts/nodejs-api:${{inputs.parameters.sha}}"
+
+          git clone "${MANIFESTS_REPO_URL}" /manifests
+          cd /manifests
+          git checkout "${MANIFESTS_BRANCH}"
+
+          VALUES_FILE="overlays/image-update/set-image-tag.yaml"
+
+          if [[ ! -f "${VALUES_FILE}" ]]; then
+            echo "Error: ${VALUES_FILE} not found in repo"
+            exit 1
+          fi
+
+          echo "Before:"
+          cat "${VALUES_FILE}"
+
+          yq eval-all --inplace \
+            '(select(fileIndex==0).image_tag) = "vatoscripts/nodejs-api:" + "${{inputs.parameters.sha}}"' \
+            "${VALUES_FILE}"
+
+          echo "After:"
+          cat "${VALUES_FILE}"
+
+          git config user.name "Argo CI Bot"
+          git config user.email "ci-bot@example.com"
+
+          git add "${VALUES_FILE}"
+
+          if git diff --staged --quiet; then
+            echo "No changes detected - nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(ci): update image tag to vatoscripts/nodejs-api:${{inputs.parameters.sha}} [skip ci]"
+
+          git remote set-url origin "https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/mofwili/k8s-gitops.git"
+
+          git push origin "${MANIFESTS_BRANCH}"
+
+          echo "Successfully pushed update"
+      env:
+        - name: MANIFESTS_REPO_URL
+          value: https://github.com/mofwili/k8s-gitops.git
+        - name: MANIFESTS_BRANCH
+          value: main

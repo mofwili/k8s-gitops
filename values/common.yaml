@@ -1,0 +1,4 @@
+#@data/values
+---
+replicas: 2
+image_tag: vatoscripts/nodejs-api:initial   # fallback

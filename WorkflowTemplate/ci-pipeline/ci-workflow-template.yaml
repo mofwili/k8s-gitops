@@ -1,0 +1,291 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ci-cd-pipeline
+  namespace: argo
+spec:
+  entrypoint: ci
+  ttlStrategy:
+    secondsAfterCompletion: 3600
+    secondsAfterSuccess: 1800
+    secondsAfterFailure: 7200
+  podGC:
+    strategy: OnWorkflowCompletion
+  synchronization:
+    mutex:
+      name: ci-cd-pipeline-lock
+
+  arguments:
+    parameters:
+      - name: repo-url
+        value: https://github.com/mofwili/nodejs-api.git
+      - name: revision
+        value: main
+      - name: manifests-repo-url
+        value: https://github.com/mofwili/k8s-gitops.git
+      - name: manifests-branch
+        value: main
+      - name: image-repo
+        value: vatoscripts/nodejs-api
+      - name: env
+        value: dev # default environment
+
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: docker-credentials
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+
+  templates:
+
+    # ===============================================
+    # DAG ENTRYPOINT
+    # ===============================================
+    - name: ci
+      dag:
+        tasks:
+          - name: clone
+            template: clone
+            arguments:
+              parameters:
+                - name: repo-url
+                  value: "{{workflow.parameters.repo-url}}"
+                - name: revision
+                  value: "{{workflow.parameters.revision}}"
+
+          - name: unit-tests
+            dependencies: [clone]
+            template: unit-tests
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+
+          - name: build-push
+            dependencies: [unit-tests]
+            template: build-push
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+
+          - name: cosign-sign
+            dependencies: [build-push]
+            template: cosign-sign
+            arguments:
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+
+          - name: integration-tests
+            dependencies: [cosign-sign]
+            template: integration-tests
+            arguments:
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+
+          - name: deploy
+            dependencies: [integration-tests]
+            template: deploy
+            arguments:
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+                - name: env
+                  value: "{{workflow.parameters.env}}"
+
+    # ===============================================
+    # CLONE REPO
+    # ===============================================
+    - name: clone
+      retryStrategy:
+        limit: 2
+      inputs:
+        parameters:
+          - name: repo-url
+          - name: revision
+      container:
+        image: alpine/git:latest
+        command: [sh, -c]
+        args:
+          - |
+            set -e
+            git clone {{inputs.parameters.repo-url}} /repo
+            cd /repo
+            git checkout {{inputs.parameters.revision}}
+            git rev-parse --short HEAD > /sha.txt
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+      outputs:
+        parameters:
+          - name: sha
+            valueFrom:
+              path: /sha.txt
+        artifacts:
+          - name: source
+            path: /repo
+            archive:
+              none: {}
+
+    # ===============================================
+    # UNIT TESTS
+    # ===============================================
+    - name: unit-tests
+      retryStrategy:
+        limit: 2
+      inputs:
+        artifacts:
+          - name: source
+            path: /repo
+      container:
+        image: node:20
+        command: [sh, -c]
+        args:
+          - |
+            cd /repo
+            npm install
+            npm test
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+
+    # ===============================================
+    # BUILD & PUSH IMAGE (KANIKO)
+    # ===============================================
+    - name: build-push
+      retryStrategy:
+        limit: 2
+      inputs:
+        artifacts:
+          - name: source
+            path: /workspace
+        parameters:
+          - name: sha
+      container:
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        command:
+          - /kaniko/executor
+        args:
+          - --dockerfile=/workspace/Dockerfile
+          - --context=dir:///workspace
+          - --destination={{workflow.parameters.image-repo}}:{{inputs.parameters.sha}}
+          - --destination={{workflow.parameters.image-repo}}:latest
+          - --cache=true
+          - --cache-copy-layers=true
+        env:
+          - name: DOCKER_CONFIG
+            value: /kaniko/.docker
+        volumeMounts:
+          - name: docker-config
+            mountPath: /kaniko/.docker
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+
+    # ===============================================
+    # COSIGN SIGNING
+    # ===============================================
+    - name: cosign-sign
+      retryStrategy:
+        limit: 2
+      inputs:
+        parameters:
+          - name: sha
+      container:
+        image: sigstore/cosign:latest
+        command: [sh, -c]
+        args:
+          - |
+            cosign sign --key /secrets/cosign.key {{workflow.parameters.image-repo}}:{{inputs.parameters.sha}}
+        volumeMounts:
+          - name: cosign-key
+            mountPath: /secrets
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      volumes:
+        - name: cosign-key
+          secret:
+            secretName: cosign-signing-key
+
+    # ===============================================
+    # INTEGRATION TESTS
+    # ===============================================
+    - name: integration-tests
+      retryStrategy:
+        limit: 2
+      inputs:
+        parameters:
+          - name: sha
+      container:
+        image: node:20-alpine
+        command: [sh, -c]
+        args:
+          - |
+            apk add --no-cache docker-cli
+            echo "Running integration tests on image {{workflow.parameters.image-repo}}:{{inputs.parameters.sha}}"
+            # Example: pull docker image, run tests
+            docker pull {{workflow.parameters.image-repo}}:{{inputs.parameters.sha}}
+            docker run --rm {{workflow.parameters.image-repo}}:{{inputs.parameters.sha}} npm run integration-test
+        volumeMounts:
+          - name: docker-sock
+            mountPath: /var/run/docker.sock
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+
+    # ===============================================
+    # DEPLOY USING ARGO ROLLOUT
+    # ===============================================
+    - name: deploy
+      inputs:
+        parameters:
+          - name: sha
+          - name: env
+      container:
+        image: bitnami/kubectl:latest
+        command: [sh, -c]
+        args:
+          - |
+            echo "Deploying {{workflow.parameters.image-repo}}:{{inputs.parameters.sha}} to {{inputs.parameters.env}}"
+            kubectl -n {{inputs.parameters.env}} set image deployment/nodejs-api nodejs-api={{workflow.parameters.image-repo}}:{{inputs.parameters.sha}}
+            # Trigger Argo Rollout
+            kubectl -n {{inputs.parameters.env}} argo rollouts promote nodejs-api
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"

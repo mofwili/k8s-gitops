@@ -1,0 +1,38 @@
+**config/nodejs-api/deployment-rollout.yaml** (using Argo Rollout + ytt):
+
+```yaml
+#@ load("@ytt:data", "data")
+#@ load("@ytt:overlay", "overlay")
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: nodejs-api
+  namespace: default
+  labels:
+    app: nodejs-api
+spec:
+  replicas: #@ data.values.replicas
+  selector:
+    matchLabels:
+      app: nodejs-api
+  template:
+    metadata:
+      labels:
+        app: nodejs-api
+    spec:
+      containers:
+      - name: api
+        image: vatoscripts/nodejs-api:latest #@data.values.image_tag   # ← ytt injects here
+        ports:
+        - containerPort: 3000
+        env:
+        - name: VERSION
+          value: #@ data.values.image_tag
+  strategy:
+    canary:
+      steps:
+      - setWeight: 20
+      - pause: {duration: 300}   # 5 min
+      - setWeight: 100
