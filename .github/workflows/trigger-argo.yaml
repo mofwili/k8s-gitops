@@ -1,4 +1,4 @@
-name: Trigger Argo Workflow on Push
+name: Trigger Argo CI on Push
 
 on:
   push:
@@ -10,11 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Argo Workflow
+        env:
+          ARGO_TOKEN: ${{ secrets.ARGO_TOKEN }}
         run: |
           curl -v -X POST \
-            -H "Authorization: Bearer YOUR_ARGO_TOKEN_HERE" \
+            -H "Authorization: Bearer $ARGO_TOKEN" \
             -H "Content-Type: application/json" \
-            https://45.220.48.2:31256/api/v1/workflows/argo/submit \
+            http://10.4.13.27:31256/api/v1/workflows/argo/submit \
             -d '{
               "namespace": "argo",
               "resource": {
