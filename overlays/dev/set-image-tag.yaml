@@ -1,0 +1,5 @@
+#@data/values
+---
+# This file is managed by Argo Workflows CI pipeline
+# Do NOT edit image_tag manually – it will be overwritten automatically
+image_tag: vatoscripts/nodejs-api:initial

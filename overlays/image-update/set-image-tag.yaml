@@ -1,3 +1,0 @@
-#@data/values
----
-image_tag: vatoscripts/nodejs-api:abc1234   # ← CI replaces this line
