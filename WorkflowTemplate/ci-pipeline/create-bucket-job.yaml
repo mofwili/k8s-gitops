@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-minio-bucket
+  namespace: argo
+spec:
+  template:
+    spec:
+      containers:
+      - name: mc
+        image: minio/mc:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "Setting up MinIO alias..."
+          mc alias set myminio http://10.4.13.26:32304 minioadmin minioadmin123
+          echo "Creating bucket..."
+          mc mb myminio/pipeline-artifacts || echo "Bucket may already exist"
+          echo "Setting bucket policy..."
+          mc anonymous set download myminio/pipeline-artifacts
+          echo "Listing buckets:"
+          mc ls myminio
+      restartPolicy: Never

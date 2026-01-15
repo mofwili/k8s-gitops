@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-artifact-repositories
+  namespace: argo
+  labels:
+    workflows.argoproj.io/configmap-type: ArtifactRepository
+data:
+  default: |
+    s3:
+      bucket: pipeline-artifacts
+      # Use EITHER external NodePort OR internal service DNS:
+      
+      # Option 1: External access via NodePort
+      endpoint: 10.4.13.26:32304
+      
+      # Option 2: Internal service DNS (recommended for cluster access)
+      # endpoint: minio.minio.svc.cluster.local:9000
+      
+      insecure: true
+      accessKeySecret:
+        name: minio-credentials
+        key: accesskey
+      secretKeySecret:
+        name: minio-credentials
+        key: secretkey
+      keyFormat: "{{workflow.namespace}}/{{workflow.name}}/{{pod.name}}/{{artifact.name}}"

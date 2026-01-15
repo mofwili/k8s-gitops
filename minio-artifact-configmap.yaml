@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-artifact-repositories
+  namespace: argo
+data:
+  artifactRepository.yaml: |
+    s3:
+      bucket: pipeline-artifacts
+      endpoint: 10.4.13.26:30633
+      insecure: true
+      accessKeySecret:
+        name: minio-credentials
+        key: accesskey
+      secretKeySecret:
+        name: minio-credentials
+        key: secretkey
+      s3ForcePathStyle: true
+

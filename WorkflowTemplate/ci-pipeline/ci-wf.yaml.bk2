@@ -1,0 +1,301 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ci-cd-pipeline
+  namespace: argo
+spec:
+  entrypoint: ci
+  artifactRepositoryRef:
+    configMap: workflow-artifact-repositories
+  arguments:
+    parameters:
+      - name: repo-url
+        value: https://github.com/mofwili/nodejs-api.git
+      - name: revision
+        value: main
+      - name: manifests-repo-url
+        value: https://github.com/mofwili/k8s-gitops.git
+      - name: manifests-branch
+        value: main
+      - name: image-repo
+        value: vatoscripts/nodejs-api
+      - name: env
+        value: dev
+
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: docker-credentials
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+
+  templates:
+    # ------------------------------------------------------
+    # DAG entrypoint
+    # ------------------------------------------------------
+    - name: ci
+      dag:
+        tasks:
+          - name: clone
+            template: clone
+            arguments:
+              parameters:
+                - name: repo-url
+                  value: "{{workflow.parameters.repo-url}}"
+                - name: revision
+                  value: "{{workflow.parameters.revision}}"
+
+          - name: unit-tests
+            dependencies: [clone]
+            template: unit-tests
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.clone.outputs.artifacts.source}}"
+
+          - name: integration-tests
+            dependencies: [unit-tests]
+            template: integration-tests
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.unit-tests.outputs.artifacts.source}}"
+
+          - name: build-push
+            dependencies: [integration-tests]
+            template: build-push
+            arguments:
+              artifacts:
+                - name: source
+                  from: "{{tasks.integration-tests.outputs.artifacts.source}}"
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+                - name: image-repo
+                  value: "{{workflow.parameters.image-repo}}"
+
+          - name: update-git
+            dependencies: [build-push]
+            template: update-git
+            arguments:
+              parameters:
+                - name: sha
+                  value: "{{tasks.clone.outputs.parameters.sha}}"
+                - name: env
+                  value: "{{workflow.parameters.env}}"
+
+    # ------------------------------------------------------
+    # Clone Source Code
+    # ------------------------------------------------------
+    - name: clone
+      inputs:
+        parameters:
+          - name: repo-url
+          - name: revision
+      container:
+        image: alpine/git:latest
+        command: [sh, -c]
+        args:
+          - |
+            set -e
+            git clone {{inputs.parameters.repo-url}} /repo
+            cd /repo
+            git checkout {{inputs.parameters.revision}}
+            git rev-parse --short HEAD > /sha.txt
+      outputs:
+        parameters:
+          - name: sha
+            valueFrom:
+              path: /sha.txt
+        artifacts:
+          - name: source
+            path: /repo
+            archive:
+              tar:
+                compression: GZIP
+            s3:
+              key: "{{workflow.name}}/clone-source.tar.gz"
+              bucket: pipeline-artifacts
+              endpoint: 10.4.13.26:30633
+              insecure: true
+              accessKeySecret:
+                name: minio-credentials
+                key: accesskey
+              secretKeySecret:
+                name: minio-credentials
+                key: secretkey
+
+    # ------------------------------------------------------
+    # Unit Tests
+    # ------------------------------------------------------
+    - name: unit-tests
+      inputs:
+        artifacts:
+          - name: source
+            path: /workspace
+      container:
+        image: node:20
+        command: [sh, -c]
+        args:
+          - |
+            cd /workspace
+            npm install
+            npm test
+      outputs:
+        artifacts:
+          - name: source
+            path: /workspace
+            archive:
+              tar:
+                compression: GZIP
+            s3:
+              key: "{{workflow.name}}/unit-tests.tar.gz"
+              bucket: pipeline-artifacts
+              endpoint: 10.4.13.26:30633
+              insecure: true
+              accessKeySecret:
+                name: minio-credentials
+                key: accesskey
+              secretKeySecret:
+                name: minio-credentials
+                key: secretkey
+
+    # ------------------------------------------------------
+    # Integration Tests
+    # ------------------------------------------------------
+    - name: integration-tests
+      inputs:
+        artifacts:
+          - name: source
+            path: /workspace
+      container:
+        image: node:20
+        command: [sh, -c]
+        args:
+          - |
+            cd /workspace
+            npm run integration-test
+      outputs:
+        artifacts:
+          - name: source
+            path: /workspace
+            archive:
+              tar:
+                compression: GZIP
+            s3:
+              key: "{{workflow.name}}/integration-tests.tar.gz"
+              bucket: pipeline-artifacts
+              endpoint: 10.4.13.26:30633
+              insecure: true
+              accessKeySecret:
+                name: minio-credentials
+                key: accesskey
+              secretKeySecret:
+                name: minio-credentials
+                key: secretkey
+
+    # ------------------------------------------------------
+    # Build & Push Docker Image with Kaniko
+    # ------------------------------------------------------
+    - name: build-push
+      inputs:
+        artifacts:
+          - name: source
+            path: /workspace
+        parameters:
+          - name: sha
+          - name: image-repo
+      container:
+        image: gcr.io/kaniko-project/executor:v1.23.2-debug
+        args:
+          - --dockerfile=/workspace/Dockerfile
+          - --context=dir:///workspace
+          - --destination={{inputs.parameters.image-repo}}:{{inputs.parameters.sha}}
+          - --destination={{inputs.parameters.image-repo}}:latest
+          - --cache=true
+          - --cache-copy-layers=true
+        env:
+          - name: DOCKER_CONFIG
+            value: /kaniko/.docker
+        volumeMounts:
+          - name: docker-config
+            mountPath: /kaniko/.docker
+      outputs:
+        artifacts:
+          - name: source
+            path: /workspace
+            archive:
+              tar:
+                compression: GZIP
+            s3:
+              key: "{{workflow.name}}/build-push.tar.gz"
+              bucket: pipeline-artifacts
+              endpoint: 10.4.13.26:30633
+              insecure: true
+              accessKeySecret:
+                name: minio-credentials
+                key: accesskey
+              secretKeySecret:
+                name: minio-credentials
+                key: secretkey
+
+    # ------------------------------------------------------
+    # Update GitOps Manifests
+    # ------------------------------------------------------
+    - name: update-git
+      inputs:
+        parameters:
+          - name: sha
+          - name: env
+      script:
+        image: mikefarah/yq:4.44.3
+        command: [bash]
+        env:
+          - name: MANIFESTS_REPO_URL
+            value: "{{workflow.parameters.manifests-repo-url}}"
+          - name: MANIFESTS_BRANCH
+            value: "{{workflow.parameters.manifests-branch}}"
+          - name: IMAGE_REPO
+            value: "{{workflow.parameters.image-repo}}"
+          - name: ENV
+            value: "{{inputs.parameters.env}}"
+          - name: GIT_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: git-credentials
+                key: username
+          - name: GIT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: git-credentials
+                key: password
+        source: |
+          set -euo pipefail
+
+          git clone "${MANIFESTS_REPO_URL}" /manifests
+          cd /manifests
+          git checkout "${MANIFESTS_BRANCH}"
+
+          FILE="overlays/${ENV}/set-image-tag.yaml"
+
+          if [[ ! -f "$FILE" ]]; then
+            echo "Error: $FILE not found"
+            exit 1
+          fi
+
+          yq -i '.image_tag = strenv(IMAGE_REPO) + ":" + strenv(SHA)' "$FILE"
+
+          git config user.name "argo-ci"
+          git config user.email "argo-ci@example.com"
+          git add "$FILE"
+
+          if git diff --staged --quiet; then
+            echo "No changes detected"
+            exit 0
+          fi
+
+          git commit -m "chore(ci): update image to ${IMAGE_REPO}:${SHA} [skip ci]"
+          git remote set-url origin "https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/mofwili/k8s-gitops.git"
+          git push origin "${MANIFESTS_BRANCH}"
+

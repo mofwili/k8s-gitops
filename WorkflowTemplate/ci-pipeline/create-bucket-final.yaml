@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-bucket-final
+  namespace: argo
+spec:
+  template:
+    spec:
+      containers:
+      - name: mc
+        image: minio/mc:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          # Wait a bit for network
+          sleep 5
+          
+          # Setup alias with internal service
+          mc alias set myminio http://minio.minio.svc.cluster.local:9000 minioadmin minioadmin123
+          
+          # Create bucket
+          mc mb myminio/pipeline-artifacts || echo "Bucket may already exist"
+          
+          # Set policy
+          mc anonymous set download myminio/pipeline-artifacts
+          
+          # List to verify
+          echo "=== Buckets ==="
+          mc ls myminio
+          
+          echo "=== Bucket info ==="
+          mc stat myminio/pipeline-artifacts
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+      restartPolicy: Never
