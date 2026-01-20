@@ -2,4 +2,4 @@
 ---
 # This file is managed by Argo Workflows CI pipeline
 # Do NOT edit image_tag manually – it will be overwritten automatically
-image_tag: vatoscripts/k8s-nodejs-backendapi:a43571d
+image_tag: vatoscripts/k8s-nodejs-backendapi:77408b0
